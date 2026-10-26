@@ -13,7 +13,10 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StatusBar } from 'expo-status-bar';
 
-const API_URL = (process.env.EXPO_PUBLIC_API_URL || 'http://10.0.2.2:8080').replace(/\/$/, '');
+const API_URL = (
+  process.env.EXPO_PUBLIC_API_URL ||
+  (Platform.OS === 'web' ? 'http://localhost:8080' : 'http://10.0.2.2:8080')
+).replace(/\/$/, '');
 
 type Portal = 'resident' | 'candidate' | 'admin';
 type Screen =

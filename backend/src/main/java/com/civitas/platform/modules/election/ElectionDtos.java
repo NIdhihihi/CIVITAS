@@ -191,5 +191,29 @@ public final class ElectionDtos {
         List<PostResponse> posts,
         List<PanelResponse> panels
     ) {}
+
+    public record AuditLogResponse(
+        long sequenceNumber,
+        String electionId,
+        String tenantId,
+        String eventType,
+        String actor,
+        String actionDetails,
+        String ipAddress,
+        String deviceFingerprint,
+        String timestamp,
+        String previousHash,
+        String entryHash
+    ) {}
+
+    public record ChainIntegrityResponse(
+        boolean valid,
+        long totalBlocks,
+        String latestHash,
+        String genesisHash,
+        String message,
+        Long tamperedAtSequence
+    ) {}
 }
+
 

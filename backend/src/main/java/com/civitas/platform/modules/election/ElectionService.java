@@ -26,6 +26,7 @@ public class ElectionService {
     private final BallotItemRepository ballotItems;
     private final TenantRepository tenants;
     private final MemberRepository members;
+    private final AuditService auditService;
 
     public ElectionService(ElectionRepository elections,
                            PostRepository posts,
@@ -35,7 +36,8 @@ public class ElectionService {
                            BallotRepository ballots,
                            BallotItemRepository ballotItems,
                            TenantRepository tenants,
-                           MemberRepository members) {
+                           MemberRepository members,
+                           AuditService auditService) {
         this.elections = elections;
         this.posts = posts;
         this.panels = panels;
@@ -45,6 +47,7 @@ public class ElectionService {
         this.ballotItems = ballotItems;
         this.tenants = tenants;
         this.members = members;
+        this.auditService = auditService;
     }
 
     @Transactional
@@ -63,6 +66,7 @@ public class ElectionService {
 
         Election election = new Election(tenant, req.title(), req.description(), start, end, creator);
         Election saved = elections.save(election);
+        auditService.logEvent(saved.getId(), tenant.getId(), "ELECTION_CREATED", creatorEmail, "Election created: " + saved.getTitle(), "127.0.0.1", "Web Client");
         return toElectionResponse(saved);
     }
 
@@ -169,7 +173,9 @@ public class ElectionService {
         }
 
         election.setStatus(newStatus);
-        return toElectionResponse(elections.save(election));
+        Election saved = elections.save(election);
+        auditService.logEvent(saved.getId(), saved.getTenant().getId(), "STATUS_CHANGED", "admin", "Status transitioned from " + current + " to " + newStatus, "127.0.0.1", "Web Client");
+        return toElectionResponse(saved);
     }
 
     // --- Post Management ---
@@ -184,6 +190,7 @@ public class ElectionService {
         }
         Post post = new Post(election, req.title(), req.description(), req.maxSelections(), req.displayOrder());
         Post saved = posts.save(post);
+        auditService.logEvent(electionId, election.getTenant().getId(), "POST_ADDED", "admin", "Post added: " + saved.getTitle(), "127.0.0.1", "Web Client");
         return new ElectionDtos.PostResponse(
                 saved.getId().toString(),
                 electionId.toString(),
@@ -207,6 +214,7 @@ public class ElectionService {
         }
         Panel panel = new Panel(election, req.name(), req.motto(), req.colorHex());
         Panel saved = panels.save(panel);
+        auditService.logEvent(electionId, election.getTenant().getId(), "PANEL_ADDED", "admin", "Panel registered: " + saved.getName(), "127.0.0.1", "Web Client");
         return toPanelResponse(saved);
     }
 
@@ -253,6 +261,7 @@ public class ElectionService {
         );
 
         ElectionCandidate saved = candidates.save(candidate);
+        auditService.logEvent(electionId, election.getTenant().getId(), "CANDIDATE_NOMINATED", req.email(), "Candidate nominated for " + post.getTitle() + ": " + saved.getFullName(), "127.0.0.1", "Web Client");
         return toCandidateResponse(saved);
     }
 
@@ -261,7 +270,9 @@ public class ElectionService {
         ElectionCandidate candidate = candidates.findById(candidateId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Candidate not found."));
         candidate.setStatus(status);
-        return toCandidateResponse(candidates.save(candidate));
+        ElectionCandidate saved = candidates.save(candidate);
+        auditService.logEvent(saved.getElection().getId(), saved.getElection().getTenant().getId(), "CANDIDATE_STATUS_CHANGED", "admin", "Candidate " + saved.getFullName() + " status set to " + status, "127.0.0.1", "Web Client");
+        return toCandidateResponse(saved);
     }
 
     // --- Voter Roll Management & Deduplication ---
@@ -354,6 +365,7 @@ public class ElectionService {
             errors.add("Error reading CSV content: " + e.getMessage());
         }
 
+        auditService.logEvent(electionId, election.getTenant().getId(), "VOTER_ROLL_IMPORTED", "admin", "Voter roll imported: " + added + " added, " + (dupFlats + dupEmails) + " duplicates flagged", "127.0.0.1", "Web Client");
         return new ElectionDtos.VoterRollUploadResult(parsedRows, added, dupFlats, dupEmails, errors);
     }
 
@@ -566,9 +578,10 @@ public class ElectionService {
 
         if (isPanelVote) {
             // Auto-cast for all approved candidates in this panel
+            UUID targetPanelId = panel.getId();
             List<ElectionCandidate> panelCandidates = candidates.findByElectionIdAndStatus(electionId, CandidateStatus.APPROVED)
                     .stream()
-                    .filter(c -> c.getPanel() != null && c.getPanel().getId().equals(panel.getId()))
+                    .filter(c -> c.getPanel() != null && c.getPanel().getId().equals(targetPanelId))
                     .toList();
             for (ElectionCandidate c : panelCandidates) {
                 ballotItems.save(new BallotItem(savedBallot, c.getPost(), c));
@@ -601,6 +614,8 @@ public class ElectionService {
                 }
             }
         }
+
+        auditService.logEvent(electionId, election.getTenant().getId(), "VOTE_CAST", "voter-anonymous", "Secret ballot recorded. Receipt: " + receiptCode + ", Hash: " + ballotHash, "127.0.0.1", "Voter App");
 
         return new ElectionDtos.VoteReceiptResponse(
                 receiptCode,

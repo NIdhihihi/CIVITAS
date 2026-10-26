@@ -27,7 +27,8 @@ type Screen =
   | 'election-detail'
   | 'ballot'
   | 'vote-receipt'
-  | 'verify-receipt';
+  | 'verify-receipt'
+  | 'audit';
 
 type Member = { id: string; email: string; fullName: string; role: string; emailVerified: boolean };
 type Tenant = { id: string; name: string; code: string; city: string; createdBy: string };
@@ -147,6 +148,29 @@ type ReceiptVerifyResponse = {
   panelName?: string;
 };
 
+type AuditLogResponse = {
+  sequenceNumber: number;
+  electionId?: string;
+  tenantId?: string;
+  eventType: string;
+  actor: string;
+  actionDetails?: string;
+  ipAddress?: string;
+  deviceFingerprint?: string;
+  timestamp: string;
+  previousHash: string;
+  entryHash: string;
+};
+
+type ChainIntegrityResponse = {
+  valid: boolean;
+  totalBlocks: number;
+  latestHash: string;
+  genesisHash: string;
+  message: string;
+  tamperedAtSequence?: number;
+};
+
 const DEFAULT_POSTS = ['Chairperson', 'Secretary', 'Treasurer', 'Committee Member'];
 
 async function api<T>(path: string, method = 'GET', body?: unknown, token?: string): Promise<T> {
@@ -258,6 +282,12 @@ export default function App() {
   const [voteReceipt, setVoteReceipt] = useState<VoteReceiptResponse | null>(null);
   const [verifyCodeInput, setVerifyCodeInput] = useState('');
   const [verifiedReceipt, setVerifiedReceipt] = useState<ReceiptVerifyResponse | null>(null);
+
+  // Phase 3: Cryptographic Audit Trail & Compliance
+  const [auditLogs, setAuditLogs] = useState<AuditLogResponse[]>([]);
+  const [chainIntegrity, setChainIntegrity] = useState<ChainIntegrityResponse | null>(null);
+  const [auditFilterType, setAuditFilterType] = useState('ALL');
+  const [auditSearch, setAuditSearch] = useState('');
 
   useEffect(() => {
     (async () => {
@@ -378,6 +408,18 @@ export default function App() {
     });
   }
 
+  async function loadAuditData() {
+    if (!token) return;
+    await run(async () => {
+      const [logs, integrity] = await Promise.all([
+        api<AuditLogResponse[]>('/api/audit/logs', 'GET', undefined, token),
+        api<ChainIntegrityResponse>('/api/audit/verify', 'GET', undefined, token)
+      ]);
+      setAuditLogs(logs);
+      setChainIntegrity(integrity);
+    });
+  }
+
   async function loadCandidateData() {
     if (!token) return;
     await run(async () => {
@@ -396,6 +438,7 @@ export default function App() {
     else if (token && screen === 'home') loadResidentData();
     if (token && (screen === 'candidate-dashboard' || screen === 'candidate-form')) loadCandidateData();
     if (token && screen === 'elections') loadAdminData();
+    if (token && screen === 'audit') loadAuditData();
   }, [token, screen]);
 
   // --- Phase 1: Election Admin Operations ---
@@ -566,7 +609,7 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
   }
 
   function toggleCandidateSelection(postId: string, candidateId: string, maxSelections: number) {
-    setSelectedPanelId(''); // Custom split vote
+    setSelectedPanelId('');
     setSelectedCandidates(prev => {
       const current = prev[postId] || [];
       const exists = current.includes(candidateId);
@@ -589,7 +632,6 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
       return;
     }
     setSelectedPanelId(panelId);
-    // Auto-select all candidates belonging to this panel
     const autoMap: Record<string, string[]> = {};
     for (const p of activeBallot.posts) {
       const match = p.candidates.find(c => c.panelId === panelId);
@@ -624,6 +666,14 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
       const res = await api<ReceiptVerifyResponse>(`/api/elections/receipts/${targetCode}`, 'GET');
       setVerifiedReceipt(res);
       setScreen('verify-receipt');
+    });
+  }
+
+  async function runChainVerification() {
+    await run(async () => {
+      const integrity = await api<ChainIntegrityResponse>('/api/audit/verify', 'GET', undefined, token);
+      setChainIntegrity(integrity);
+      setNotice(integrity.valid ? `✓ Blockchain Integrity Confirmed: All ${integrity.totalBlocks} blocks valid.` : `⚠ Warning: ${integrity.message}`);
     });
   }
 
@@ -753,7 +803,6 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
                 </View>
               </View>
 
-              {/* Status / Eligibility Check */}
               {!activeBallot.isEligible ? (
                 <View style={[styles.workflowBox, { backgroundColor: '#fef2f2', borderColor: '#fecaca' }]}>
                   <Text style={{ fontWeight: '800', color: '#991b1b' }}>Ineligible to Vote</Text>
@@ -766,7 +815,6 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
                 </View>
               ) : null}
 
-              {/* Panel Quick Voting (Unified Slate) */}
               {activeBallot.panels.length > 0 && activeBallot.isEligible && !activeBallot.hasVoted && (
                 <View style={styles.panelVoteBox}>
                   <Text style={styles.fieldLabel}>OPTION 1: VOTE UNIFIED COALITION / SLATE</Text>
@@ -796,7 +844,7 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
               )}
             </View>
 
-            {/* Contested Posts & Candidate Cards */}
+            {/* Contested Posts */}
             {activeBallot.posts.map(p => {
               const selectedList = selectedCandidates[p.id] || [];
               return (
@@ -850,7 +898,6 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
               );
             })}
 
-            {/* Review & Dual-Factor Confirmation Box */}
             {activeBallot.isEligible && !activeBallot.hasVoted && (
               <View style={styles.card}>
                 <Text style={styles.sectionTitle}>Review & Dual-Factor Authorization</Text>
@@ -920,7 +967,7 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
           </>
         ) : screen === 'verify-receipt' ? (
           <>
-            {/* 4. VERIFY RECEIPT SCREEN (Phase 2) */}
+            {/* 4. VERIFY RECEIPT SCREEN */}
             <Pressable onPress={() => setScreen('home')} style={styles.backButton}>
               <Text style={styles.backText}>‹ Back to Dashboard</Text>
             </Pressable>
@@ -945,11 +992,6 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
                     <Text style={styles.itemTitle}>{verifiedReceipt.electionTitle}</Text>
                     <Text style={styles.small}>Society: {verifiedReceipt.societyName}</Text>
                     <Text style={[styles.small, { marginTop: 6 }]}>Cast At: {verifiedReceipt.castAt}</Text>
-                    {verifiedReceipt.isPanelVote && (
-                      <Text style={[styles.small, { color: '#0e7490', fontWeight: '800', marginTop: 4 }]}>
-                        Cast via Panel: {verifiedReceipt.panelName || 'Coalition Slate'}
-                      </Text>
-                    )}
                   </View>
                 </View>
               ) : (
@@ -973,12 +1015,12 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
           </>
         ) : member?.role === 'PLATFORM_ADMIN' || portal === 'admin' ? (
           <>
-            {/* ADMIN PORTAL */}
+            {/* 5. ADMIN & AUDITOR PORTAL (Phase 1, 2 & 3) */}
             <Brand />
             <View style={styles.welcome}>
-              <Text style={styles.eyebrow}>ELECTION ADMINISTRATION</Text>
+              <Text style={styles.eyebrow}>ELECTION ADMINISTRATION & AUDIT</Text>
               <Text style={styles.formTitle}>Hello, {member?.fullName || email}</Text>
-              <Text style={styles.muted}>Manage housing societies, election lifecycles, and voter rolls.</Text>
+              <Text style={styles.muted}>Manage elections, voter rolls, and tamper-evident audit ledger.</Text>
             </View>
             {!!notice && <Text style={styles.notice}>{notice}</Text>}
 
@@ -990,10 +1032,130 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
               <Pressable style={[styles.navItem, (screen === 'elections' || screen === 'election-detail' || screen === 'election-create') && styles.navActive]} onPress={() => setScreen('elections')}>
                 <Text style={[styles.navText, (screen === 'elections' || screen === 'election-detail' || screen === 'election-create') && styles.navTextActive]}>Elections</Text>
               </Pressable>
+              <Pressable style={[styles.navItem, screen === 'audit' && styles.navActive]} onPress={() => setScreen('audit')}>
+                <Text style={[styles.navText, screen === 'audit' && styles.navTextActive]}>Audit Trail</Text>
+              </Pressable>
               <Pressable style={[styles.navItem, screen === 'tenant' && styles.navActive]} onPress={() => setScreen('tenant')}>
                 <Text style={[styles.navText, screen === 'tenant' && styles.navTextActive]}>Societies</Text>
               </Pressable>
             </View>
+
+            {/* SCREEN: AUDIT TRAIL (Phase 3) */}
+            {screen === 'audit' && (
+              <>
+                <View style={styles.card}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <View>
+                      <Text style={styles.sectionTitle}>Cryptographic Audit Trail</Text>
+                      <Text style={styles.muted}>Immutable hash-chained ledger (Sec 73CB Legal Compliance)</Text>
+                    </View>
+                    <Pressable onPress={runChainVerification} style={styles.refreshPill}>
+                      <Text style={styles.refreshText}>↻ Verify Chain</Text>
+                    </Pressable>
+                  </View>
+
+                  {/* Chain Integrity Status Card */}
+                  {chainIntegrity && (
+                    <View style={[styles.workflowBox, { backgroundColor: chainIntegrity.valid ? '#f0fdf4' : '#fef2f2', borderColor: chainIntegrity.valid ? '#bbf7d0' : '#fecaca', marginTop: 12 }]}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Text style={{ fontWeight: '900', color: chainIntegrity.valid ? '#166534' : '#991b1b', fontSize: 14 }}>
+                          {chainIntegrity.valid ? '✓ HASH CHAIN INTEGRITY: 100% SOUND' : '⚠ TAMPERING DETECTED IN CHAIN'}
+                        </Text>
+                        <View style={[styles.statusPill, { backgroundColor: chainIntegrity.valid ? '#dcfce7' : '#fee2e2' }]}>
+                          <Text style={[styles.statusText, { color: chainIntegrity.valid ? '#15803d' : '#b91c1c' }]}>
+                            {chainIntegrity.totalBlocks} BLOCKS
+                          </Text>
+                        </View>
+                      </View>
+                      <Text style={[styles.small, { marginTop: 4, color: '#334155' }]}>{chainIntegrity.message}</Text>
+                      <Text style={[styles.small, { marginTop: 2, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', color: '#64748b' }]}>
+                        LATEST BLOCK HASH: {chainIntegrity.latestHash.slice(0, 24)}…
+                      </Text>
+                    </View>
+                  )}
+
+                  {/* Filter & Search Bar */}
+                  <View style={{ marginTop: 14 }}>
+                    <Field
+                      label="SEARCH AUDIT LOGS"
+                      value={auditSearch}
+                      onChangeText={setAuditSearch}
+                      placeholder="Filter by actor, action details, or IP..."
+                    />
+                    <Text style={[styles.fieldLabel, { marginTop: 10 }]}>EVENT TYPE FILTER</Text>
+                    <View style={styles.postGrid}>
+                      {['ALL', 'VOTE_CAST', 'LOGIN_SUCCESS', 'LOGIN_FAILED', 'STATUS_CHANGED', 'VOTER_ROLL_IMPORTED', 'SUSPICIOUS_ACTIVITY_FLAGGED'].map(type => (
+                        <Pressable
+                          key={type}
+                          onPress={() => setAuditFilterType(type)}
+                          style={[styles.postOption, auditFilterType === type && styles.postOptionSelected]}
+                        >
+                          <Text style={[styles.postOptionText, auditFilterType === type && styles.postOptionTextSelected]}>
+                            {type.replace('_', ' ')}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </View>
+                </View>
+
+                {/* Audit Entries List */}
+                <View style={styles.card}>
+                  <Text style={styles.sectionTitle}>
+                    Ledger Events ({
+                      auditLogs
+                        .filter(l => auditFilterType === 'ALL' || l.eventType === auditFilterType)
+                        .filter(l => !auditSearch.trim() || (l.actor + l.actionDetails + l.ipAddress).toLowerCase().includes(auditSearch.toLowerCase()))
+                        .length
+                    })
+                  </Text>
+
+                  {auditLogs.length === 0 ? (
+                    <Text style={[styles.muted, { marginVertical: 12 }]}>No audit events recorded yet.</Text>
+                  ) : (
+                    auditLogs
+                      .filter(l => auditFilterType === 'ALL' || l.eventType === auditFilterType)
+                      .filter(l => !auditSearch.trim() || (l.actor + l.actionDetails + l.ipAddress).toLowerCase().includes(auditSearch.toLowerCase()))
+                      .map(log => {
+                        const isSuspicious = log.eventType === 'SUSPICIOUS_ACTIVITY_FLAGGED';
+                        const isVote = log.eventType === 'VOTE_CAST';
+                        const isLoginFail = log.eventType === 'LOGIN_FAILED';
+
+                        return (
+                          <View key={log.sequenceNumber} style={[styles.auditRowItem, isSuspicious && styles.auditRowSuspicious]}>
+                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                                <View style={styles.sequenceBadge}>
+                                  <Text style={styles.sequenceBadgeText}>#{log.sequenceNumber}</Text>
+                                </View>
+                                <View style={[
+                                  styles.statusPill,
+                                  isSuspicious ? { backgroundColor: '#fee2e2' } : isVote ? { backgroundColor: '#e0f2fe' } : isLoginFail ? { backgroundColor: '#fef3c7' } : { backgroundColor: '#f1f5f9' }
+                                ]}>
+                                  <Text style={[
+                                    styles.statusText,
+                                    isSuspicious ? { color: '#991b1b' } : isVote ? { color: '#0369a1' } : isLoginFail ? { color: '#92400e' } : { color: '#475569' }
+                                  ]}>
+                                    {log.eventType}
+                                  </Text>
+                                </View>
+                              </View>
+                              <Text style={styles.small}>{formatDate(log.timestamp)}</Text>
+                            </View>
+
+                            <Text style={[styles.itemTitle, { marginTop: 6, fontSize: 13 }]}>{log.actionDetails}</Text>
+                            <Text style={styles.small}>Actor: <Text style={{ fontWeight: '700' }}>{log.actor}</Text> · IP: {log.ipAddress} · Client: {log.deviceFingerprint}</Text>
+
+                            <View style={styles.hashChainBox}>
+                              <Text style={styles.hashChainText}>PREV: {log.previousHash.slice(0, 16)}…  →  HASH: {log.entryHash.slice(0, 16)}…</Text>
+                            </View>
+                          </View>
+                        );
+                      })
+                  )}
+                </View>
+              </>
+            )}
 
             {/* SCREEN: HOME (Overview) */}
             {screen === 'home' && (
@@ -1008,8 +1170,8 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
                     <Text style={styles.muted}>Elections</Text>
                   </View>
                   <View style={styles.stat}>
-                    <Text style={styles.statNum}>{adminApplications.length}</Text>
-                    <Text style={styles.muted}>Nominations</Text>
+                    <Text style={styles.statNum}>{auditLogs.length}</Text>
+                    <Text style={styles.muted}>Audit Blocks</Text>
                   </View>
                 </View>
 
@@ -1118,7 +1280,6 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
                   <Text style={styles.backText}>‹ Back to Elections</Text>
                 </Pressable>
 
-                {/* Election Header Card */}
                 <View style={styles.card}>
                   <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
                     <View style={{ flex: 1 }}>
@@ -1128,7 +1289,6 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
                     <ElectionStatusPill status={activeElection.election.status} />
                   </View>
 
-                  {/* Status Progression Workflow */}
                   <View style={styles.workflowBox}>
                     <Text style={styles.workflowTitle}>LIFECYCLE CONTROLS</Text>
                     <Text style={styles.small}>Current Status: {activeElection.election.status}</Text>
@@ -1148,7 +1308,6 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
                     </View>
                   </View>
 
-                  {/* Detail Sub-Tabs */}
                   <View style={[styles.nav, { marginTop: 18 }]}>
                     <Pressable style={[styles.navItem, detailTab === 'posts' && styles.navActive]} onPress={() => setDetailTab('posts')}>
                       <Text style={[styles.navText, detailTab === 'posts' && styles.navTextActive]}>Posts ({activeElection.posts.length})</Text>
@@ -1412,7 +1571,7 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
           </>
         ) : (
           <>
-            {/* RESIDENT PORTAL (Phase 1 & Phase 2 Integrated) */}
+            {/* 6. RESIDENT PORTAL */}
             <Brand />
             <View style={styles.welcome}>
               <Text style={styles.eyebrow}>RESIDENT VOTER PORTAL</Text>
@@ -1421,7 +1580,6 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
             </View>
             {!!notice && <Text style={styles.notice}>{notice}</Text>}
 
-            {/* Resident Elections Section */}
             <View style={styles.card}>
               <Text style={styles.sectionTitle}>Elections in Your Societies</Text>
               <Text style={styles.muted}>Cast your ballot securely or review past election results.</Text>
@@ -1452,7 +1610,6 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
               )}
             </View>
 
-            {/* Audit Receipt Verification Box */}
             <View style={styles.card}>
               <Text style={styles.sectionTitle}>Audit & Receipt Verification</Text>
               <Text style={styles.muted}>Verify that your ballot hash exists in the tamper-evident ledger.</Text>
@@ -1471,7 +1628,6 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
               />
             </View>
 
-            {/* Resident Societies */}
             <View style={styles.card}>
               <Text style={styles.sectionTitle}>Your Societies</Text>
               {tenants.length === 0 ? (
@@ -1486,7 +1642,6 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
               )}
             </View>
 
-            {/* Available Societies to Join */}
             <View style={styles.card}>
               <Text style={styles.sectionTitle}>Join a Housing Society</Text>
               <Text style={styles.muted}>Join to be listed on your community's roster.</Text>
@@ -1762,5 +1917,13 @@ const styles = StyleSheet.create({
   receiptSuccessIcon: { width: 64, height: 64, borderRadius: 32, backgroundColor: '#ccfbf1', alignSelf: 'center', alignItems: 'center', justifyContent: 'center', marginTop: 8 },
   receiptCodeCard: { backgroundColor: '#f8fafc', padding: 16, borderRadius: 14, borderWidth: 1, borderColor: '#e2e8f0', marginVertical: 12 },
   receiptCodeText: { fontSize: 18, fontWeight: '900', color: '#0e7490', letterSpacing: 1.5, marginVertical: 4, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' },
-  receiptHashText: { fontSize: 10, color: '#64748b', fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', marginTop: 2 }
+  receiptHashText: { fontSize: 10, color: '#64748b', fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', marginTop: 2 },
+
+  // Phase 3: Audit Trail Styles
+  auditRowItem: { paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#edf1f3' },
+  auditRowSuspicious: { backgroundColor: '#fef2f2', paddingHorizontal: 10, borderRadius: 10, marginVertical: 4 },
+  sequenceBadge: { backgroundColor: '#e2e8f0', paddingHorizontal: 6, paddingVertical: 3, borderRadius: 6 },
+  sequenceBadgeText: { fontSize: 10, fontWeight: '900', color: '#334155', fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' },
+  hashChainBox: { backgroundColor: '#f1f5f9', padding: 6, borderRadius: 6, marginTop: 6 },
+  hashChainText: { fontSize: 9, color: '#475569', fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' }
 });

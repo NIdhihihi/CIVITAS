@@ -1,6 +1,5 @@
 package com.civitas.platform.config;
 
-import org.hibernate.engine.jdbc.connections.spi.MultiTenantConnectionProvider;
 import org.springframework.stereotype.Component;
 
 import javax.sql.DataSource;

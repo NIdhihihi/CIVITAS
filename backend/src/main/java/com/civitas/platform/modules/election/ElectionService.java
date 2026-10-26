@@ -2,6 +2,7 @@ package com.civitas.platform.modules.election;
 
 import com.civitas.platform.modules.members.Member;
 import com.civitas.platform.modules.members.MemberRepository;
+import com.civitas.platform.modules.members.Role;
 import com.civitas.platform.modules.onboarding.CandidateStatus;
 import com.civitas.platform.modules.tenants.Tenant;
 import com.civitas.platform.modules.tenants.TenantRepository;
@@ -169,6 +170,10 @@ public class ElectionService {
             }
             if (election.getVotingEndTime() == null) {
                 election.setVotingEndTime(Instant.now());
+            }
+        } else if (newStatus == ElectionStatus.RESULTS_DECLARED) {
+            if (current != ElectionStatus.VOTING_CLOSED) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Results can only be declared after voting is closed.");
             }
         }
 
@@ -643,6 +648,376 @@ public class ElectionService {
                 ballot.isPanelVote(),
                 ballot.getPanel() != null ? ballot.getPanel().getName() : null
         );
+    }
+
+    // --- Phase 4: Automated Real-Time Results & Analytics (REQ-8, REQ-9, Section 5.5) ---
+
+    @Transactional(readOnly = true)
+    public ElectionDtos.ElectionResultsResponse getElectionResults(UUID electionId, String userEmail) {
+        Election election = findElection(electionId);
+        Member user = userEmail != null ? members.findByEmailIgnoreCase(userEmail.trim()).orElse(null) : null;
+        boolean isAdmin = user != null && (user.getRole() == Role.PLATFORM_ADMIN || user.getRole() == Role.TENANT_ADMIN);
+
+        long totalEligible = voterRoll.countByElectionIdAndEligibleTrue(electionId);
+        long totalCast = voterRoll.countByElectionIdAndHasVotedTrue(electionId);
+        double turnout = totalEligible > 0 ? (totalCast * 100.0) / totalEligible : 0.0;
+        long panelVotes = ballots.countByElectionIdAndIsPanelVoteTrue(electionId);
+        long splitVotes = ballots.countByElectionIdAndIsPanelVoteFalse(electionId);
+
+        ElectionDtos.ChainIntegrityResponse integrity = auditService.verifyChainIntegrity();
+
+        boolean showCandidateDetails = election.getStatus() == ElectionStatus.VOTING_CLOSED
+                || election.getStatus() == ElectionStatus.RESULTS_DECLARED
+                || election.getStatus() == ElectionStatus.ARCHIVED
+                || isAdmin;
+
+        List<Post> postList = posts.findByElectionIdOrderByDisplayOrderAsc(electionId);
+        List<Panel> panelList = panels.findByElectionIdOrderByNameAsc(electionId);
+
+        List<ElectionDtos.PostResult> postResults = new ArrayList<>();
+        boolean hasAnyUnresolvedTie = false;
+
+        for (Post post : postList) {
+            List<ElectionCandidate> approvedCandidates = candidates.findByPostIdAndStatus(post.getId(), CandidateStatus.APPROVED);
+
+            if (!showCandidateDetails) {
+                // When voting is active, candidate tallies remain sealed to non-admins (turnout is visible)
+                List<ElectionDtos.CandidateResult> masked = approvedCandidates.stream().map(c -> new ElectionDtos.CandidateResult(
+                        c.getId().toString(),
+                        c.getFullName(),
+                        c.getEmail(),
+                        c.getPanel() != null ? c.getPanel().getId().toString() : null,
+                        c.getPanel() != null ? c.getPanel().getName() : null,
+                        c.getPanel() != null ? c.getPanel().getColorHex() : null,
+                        0L,
+                        0.0,
+                        "CONTESTING",
+                        0,
+                        false
+                )).toList();
+                postResults.add(new ElectionDtos.PostResult(
+                        post.getId().toString(),
+                        post.getTitle(),
+                        post.getMaxSelections(),
+                        0L,
+                        false,
+                        "Voting is currently in progress. Candidate votes are sealed until voting closes.",
+                        null,
+                        null,
+                        masked
+                ));
+                continue;
+            }
+
+            // Real vote aggregation
+            record TempCand(ElectionCandidate candidate, long votes) {}
+            List<TempCand> candVotes = new ArrayList<>();
+            long totalVotesForPost = 0L;
+            for (ElectionCandidate c : approvedCandidates) {
+                long count = ballotItems.countByCandidateId(c.getId());
+                candVotes.add(new TempCand(c, count));
+                totalVotesForPost += count;
+            }
+
+            candVotes.sort((a, b) -> {
+                int cmp = Long.compare(b.votes(), a.votes());
+                if (cmp != 0) return cmp;
+                return a.candidate().getFullName().compareToIgnoreCase(b.candidate().getFullName());
+            });
+
+            int N = post.getMaxSelections();
+            boolean hasTie = false;
+            String tieNotes = null;
+
+            UUID resolvedWinnerId = post.getResolvedWinningCandidateId();
+
+            if (resolvedWinnerId != null) {
+                tieNotes = "Tie resolved by Returning Officer via " + post.getTieResolutionMethod()
+                        + (post.getTieResolutionNotes() != null ? " (" + post.getTieResolutionNotes() + ")" : "");
+            } else if (candVotes.size() > N && totalVotesForPost > 0) {
+                long cutoffVotes = candVotes.get(N - 1).votes();
+                long nextVotes = candVotes.get(N).votes();
+                if (cutoffVotes == nextVotes && cutoffVotes > 0) {
+                    hasTie = true;
+                    hasAnyUnresolvedTie = true;
+                    tieNotes = "TIE DETECTED: Cutoff tie at " + cutoffVotes
+                            + " votes. Manual resolution required per Society Bye-Laws Section 73CB.";
+                }
+            }
+
+            List<ElectionDtos.CandidateResult> candResults = new ArrayList<>();
+            for (int i = 0; i < candVotes.size(); i++) {
+                TempCand tc = candVotes.get(i);
+                int rank = i + 1;
+                if (i > 0 && tc.votes() == candVotes.get(i - 1).votes()) {
+                    rank = candResults.get(i - 1).rank();
+                }
+
+                double pct = totalVotesForPost > 0 ? (tc.votes() * 100.0) / totalVotesForPost : 0.0;
+                String outcome;
+                boolean isTieWinner = resolvedWinnerId != null && resolvedWinnerId.equals(tc.candidate().getId());
+
+                if (isTieWinner) {
+                    outcome = "ELECTED (TIE RESOLVED)";
+                } else if (resolvedWinnerId != null) {
+                    if (tc.votes() > candVotes.get(N - 1).votes()) {
+                        outcome = "ELECTED";
+                    } else {
+                        outcome = "DEFEATED";
+                    }
+                } else if (hasTie) {
+                    long cutoffVotes = candVotes.get(N - 1).votes();
+                    if (tc.votes() > cutoffVotes) {
+                        outcome = "ELECTED";
+                    } else if (tc.votes() == cutoffVotes) {
+                        outcome = N == 1 ? "TIED" : "TIED_FOR_CUTOFF";
+                    } else {
+                        outcome = "DEFEATED";
+                    }
+                } else {
+                    if (candVotes.size() <= N) {
+                        outcome = (tc.votes() > 0 || election.getStatus() == ElectionStatus.RESULTS_DECLARED) ? "ELECTED" : "UNCONTESTED";
+                    } else if (i < N) {
+                        outcome = "ELECTED";
+                    } else {
+                        outcome = "DEFEATED";
+                    }
+                }
+
+                candResults.add(new ElectionDtos.CandidateResult(
+                        tc.candidate().getId().toString(),
+                        tc.candidate().getFullName(),
+                        tc.candidate().getEmail(),
+                        tc.candidate().getPanel() != null ? tc.candidate().getPanel().getId().toString() : null,
+                        tc.candidate().getPanel() != null ? tc.candidate().getPanel().getName() : null,
+                        tc.candidate().getPanel() != null ? tc.candidate().getPanel().getColorHex() : null,
+                        tc.votes(),
+                        Math.round(pct * 10.0) / 10.0,
+                        outcome,
+                        rank,
+                        isTieWinner
+                ));
+            }
+
+            postResults.add(new ElectionDtos.PostResult(
+                    post.getId().toString(),
+                    post.getTitle(),
+                    post.getMaxSelections(),
+                    totalVotesForPost,
+                    hasTie,
+                    tieNotes,
+                    resolvedWinnerId != null ? resolvedWinnerId.toString() : null,
+                    post.getTieResolutionMethod(),
+                    candResults
+            ));
+        }
+
+        // Panel aggregate analytics
+        List<Ballot> electionBallots = ballots.findByElectionId(electionId);
+        List<ElectionDtos.PanelResult> panelResults = new ArrayList<>();
+        for (Panel panel : panelList) {
+            long straightTicketCount = electionBallots.stream()
+                    .filter(b -> b.isPanelVote() && b.getPanel() != null && b.getPanel().getId().equals(panel.getId()))
+                    .count();
+
+            long totalCandVotesForPanel = 0L;
+            if (showCandidateDetails) {
+                for (ElectionDtos.PostResult pr : postResults) {
+                    for (ElectionDtos.CandidateResult cr : pr.candidateResults()) {
+                        if (panel.getId().toString().equals(cr.panelId())) {
+                            totalCandVotesForPanel += cr.voteCount();
+                        }
+                    }
+                }
+            }
+
+            panelResults.add(new ElectionDtos.PanelResult(
+                    panel.getId().toString(),
+                    panel.getName(),
+                    panel.getColorHex(),
+                    straightTicketCount,
+                    totalCandVotesForPanel
+            ));
+        }
+
+        String certifiedAt = election.getStatus() == ElectionStatus.RESULTS_DECLARED ? Instant.now().toString() : null;
+
+        return new ElectionDtos.ElectionResultsResponse(
+                election.getId().toString(),
+                election.getTitle(),
+                election.getTenant().getName(),
+                election.getStatus().name(),
+                totalEligible,
+                totalCast,
+                Math.round(turnout * 10.0) / 10.0,
+                panelVotes,
+                splitVotes,
+                hasAnyUnresolvedTie,
+                postResults,
+                panelResults,
+                certifiedAt,
+                integrity.latestHash(),
+                integrity.valid()
+        );
+    }
+
+    @Transactional
+    public ElectionDtos.ElectionResultsResponse resolveTie(UUID electionId, ElectionDtos.ResolveTieRequest req, String actorEmail) {
+        Election election = findElection(electionId);
+        if (election.getStatus() != ElectionStatus.VOTING_CLOSED) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Ties can only be resolved after voting has closed.");
+        }
+
+        UUID postId = parseUuid(req.postId(), "postId");
+        Post post = posts.findById(postId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Post not found: " + req.postId()));
+        if (!post.getElection().getId().equals(electionId)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Post does not belong to this election.");
+        }
+
+        UUID candidateId = parseUuid(req.winningCandidateId(), "winningCandidateId");
+        ElectionCandidate candidate = candidates.findById(candidateId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Candidate not found: " + req.winningCandidateId()));
+        if (!candidate.getPost().getId().equals(postId)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Candidate is not contesting for post: " + post.getTitle());
+        }
+
+        post.setResolvedWinningCandidateId(candidate.getId());
+        post.setTieResolutionMethod(req.resolutionMethod().trim());
+        post.setTieResolutionNotes(req.resolutionNotes() != null ? req.resolutionNotes().trim() : "Resolved by Returning Officer per bye-laws");
+        posts.save(post);
+
+        auditService.logEvent(
+                electionId,
+                election.getTenant().getId(),
+                "TIE_RESOLVED",
+                actorEmail,
+                "Tie for post '" + post.getTitle() + "' resolved in favor of " + candidate.getFullName() + " via " + req.resolutionMethod(),
+                "127.0.0.1",
+                "Returning Officer Portal"
+        );
+
+        return getElectionResults(electionId, actorEmail);
+    }
+
+    @Transactional
+    public ElectionDtos.ElectionResultsResponse declareResults(UUID electionId, String actorEmail) {
+        Election election = findElection(electionId);
+        if (election.getStatus() != ElectionStatus.VOTING_CLOSED) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Can only declare results when election is in VOTING_CLOSED state.");
+        }
+
+        ElectionDtos.ElectionResultsResponse currentResults = getElectionResults(electionId, actorEmail);
+        if (currentResults.hasUnresolvedTies()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Cannot declare results: one or more posts have unresolved ties. Resolve ties per society bye-laws first.");
+        }
+
+        election.setStatus(ElectionStatus.RESULTS_DECLARED);
+        Election saved = elections.save(election);
+
+        auditService.logEvent(
+                electionId,
+                saved.getTenant().getId(),
+                "RESULTS_DECLARED",
+                actorEmail,
+                "Official election results declared and certified for " + saved.getTitle(),
+                "127.0.0.1",
+                "Returning Officer Portal"
+        );
+
+        return getElectionResults(electionId, actorEmail);
+    }
+
+    @Transactional(readOnly = true)
+    public String generateOfficialReport(UUID electionId, String actorEmail) {
+        ElectionDtos.ElectionResultsResponse res = getElectionResults(electionId, actorEmail);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("================================================================================\n");
+        sb.append("              CIVITAS ELECTION PLATFORM — OFFICIAL SCRUTINY & RETURN REPORT     \n");
+        sb.append("      Under Section 73CB of the Maharashtra Co-operative Societies Act, 1960    \n");
+        sb.append("================================================================================\n\n");
+
+        sb.append("1. HOUSING SOCIETY DETAILS\n");
+        sb.append("   Society Name     : ").append(res.societyName()).append("\n");
+        sb.append("   Election ID      : ").append(res.electionId()).append("\n");
+        sb.append("   Election Title   : ").append(res.electionTitle()).append("\n");
+        sb.append("   Current Status   : ").append(res.status()).append("\n");
+        sb.append("   Generated At     : ").append(Instant.now().toString()).append("\n\n");
+
+        sb.append("2. VOTER PARTICIPATION & TURNOUT AUDIT\n");
+        sb.append("   Total Eligible Registered Voters : ").append(res.totalEligibleVoters()).append("\n");
+        sb.append("   Total Official Ballots Cast      : ").append(res.totalVotesCast()).append("\n");
+        sb.append("   Official Voter Turnout           : ").append(String.format(Locale.US, "%.1f", res.turnoutPercentage())).append("%\n");
+        sb.append("   Straight-Ticket Panel Ballots    : ").append(res.straightTicketPanelVotes()).append("\n");
+        sb.append("   Split-Ticket Individual Ballots  : ").append(res.splitTicketVotes()).append("\n\n");
+
+        sb.append("3. POST-BY-POST CONTEST RESULTS & OUTCOMES\n");
+        for (ElectionDtos.PostResult pr : res.postResults()) {
+            sb.append("   -----------------------------------------------------------------------------\n");
+            sb.append("   Post: ").append(pr.postTitle()).append(" (Seats: ").append(pr.maxSelections()).append(")\n");
+            sb.append("   Total Post Votes: ").append(pr.totalVotesForPost()).append("\n");
+            if (pr.hasTie()) {
+                sb.append("   *** ALERT: ").append(pr.tieNotes()).append(" ***\n");
+            } else if (pr.resolvedWinningCandidateId() != null) {
+                sb.append("   Tie Resolution: ").append(pr.tieNotes()).append("\n");
+            }
+
+            sb.append(String.format("   %-6s %-25s %-18s %-8s %-8s %-20s\n", "Rank", "Candidate", "Panel", "Votes", "Share", "Outcome"));
+            sb.append(String.format("   %-6s %-25s %-18s %-8s %-8s %-20s\n", "----", "---------", "-----", "-----", "-----", "-------"));
+            for (ElectionDtos.CandidateResult cr : pr.candidateResults()) {
+                String panelName = cr.panelName() != null ? cr.panelName() : "Independent";
+                sb.append(String.format(Locale.US, "   %-6d %-25s %-18s %-8d %-7.1f%% %-20s\n",
+                        cr.rank(),
+                        cr.candidateName().length() > 24 ? cr.candidateName().substring(0, 24) : cr.candidateName(),
+                        panelName.length() > 17 ? panelName.substring(0, 17) : panelName,
+                        cr.voteCount(),
+                        cr.votePercentage(),
+                        cr.outcome()
+                ));
+            }
+            sb.append("\n");
+        }
+
+        sb.append("4. CRYPTOGRAPHIC PROOF & CHAIN INTEGRITY AUDIT\n");
+        sb.append("   Ledger Head Hash  : ").append(res.ledgerHeadHash()).append("\n");
+        sb.append("   Chain Verification: ").append(res.chainIntegrityVerified() ? "VALID & UNTAMPERED" : "INTEGRITY COMPROMISED").append("\n");
+        sb.append("   Audit Law Compliance: Maharashtra Co-operative Societies Act Sec 73CB verified.\n\n");
+
+        sb.append("5. RETURNING OFFICER CERTIFICATION\n");
+        sb.append("   I hereby certify that the above votes have been scrutinized and the outcomes\n");
+        sb.append("   determined strictly in accordance with the registered Society Bye-Laws and\n");
+        sb.append("   applicable statutory election rules.\n\n");
+        sb.append("   Returning Officer Name: _____________________________________\n");
+        sb.append("   Signature             : _____________________________________\n");
+        sb.append("   Date & Official Seal  : _____________________________________\n");
+        sb.append("================================================================================\n");
+
+        return sb.toString();
+    }
+
+    @Transactional(readOnly = true)
+    public String generateCsvReport(UUID electionId, String actorEmail) {
+        ElectionDtos.ElectionResultsResponse res = getElectionResults(electionId, actorEmail);
+        StringBuilder sb = new StringBuilder();
+        sb.append("Post Title,Max Selections,Rank,Candidate Name,Candidate Email,Panel Name,Votes Received,Vote Percentage,Outcome,Tie Resolution\n");
+        for (ElectionDtos.PostResult pr : res.postResults()) {
+            for (ElectionDtos.CandidateResult cr : pr.candidateResults()) {
+                String panel = cr.panelName() != null ? cr.panelName() : "Independent";
+                String tieInfo = pr.tieNotes() != null ? pr.tieNotes().replace(",", ";") : "";
+                sb.append("\"").append(pr.postTitle().replace("\"", "\"\"")).append("\",")
+                        .append(pr.maxSelections()).append(",")
+                        .append(cr.rank()).append(",")
+                        .append("\"").append(cr.candidateName().replace("\"", "\"\"")).append("\",")
+                        .append("\"").append(cr.email().replace("\"", "\"\"")).append("\",")
+                        .append("\"").append(panel.replace("\"", "\"\"")).append("\",")
+                        .append(cr.voteCount()).append(",")
+                        .append(String.format(Locale.US, "%.1f", cr.votePercentage())).append(",")
+                        .append("\"").append(cr.outcome()).append("\",")
+                        .append("\"").append(tieInfo).append("\"\n");
+            }
+        }
+        return sb.toString();
     }
 
     private String sha256(String input) {

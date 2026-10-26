@@ -28,6 +28,7 @@ type Screen =
   | 'ballot'
   | 'vote-receipt'
   | 'verify-receipt'
+  | 'results-view'
   | 'audit';
 
 type Member = { id: string; email: string; fullName: string; role: string; emailVerified: boolean };
@@ -171,6 +172,59 @@ type ChainIntegrityResponse = {
   tamperedAtSequence?: number;
 };
 
+// Phase 4: Results & Official Scrutiny Report Types
+type CandidateResult = {
+  candidateId: string;
+  candidateName: string;
+  email: string;
+  panelId?: string;
+  panelName?: string;
+  panelColorHex?: string;
+  voteCount: number;
+  votePercentage: number;
+  outcome: string;
+  rank: number;
+  isTieBreakerWinner: boolean;
+};
+
+type PostResult = {
+  postId: string;
+  postTitle: string;
+  maxSelections: number;
+  totalVotesForPost: number;
+  hasTie: boolean;
+  tieNotes?: string;
+  resolvedWinningCandidateId?: string;
+  tieResolutionMethod?: string;
+  candidateResults: CandidateResult[];
+};
+
+type PanelResult = {
+  panelId: string;
+  panelName: string;
+  colorHex?: string;
+  straightTicketVotes: number;
+  totalCandidateVotes: number;
+};
+
+type ElectionResultsResponse = {
+  electionId: string;
+  electionTitle: string;
+  societyName: string;
+  status: string;
+  totalEligibleVoters: number;
+  totalVotesCast: number;
+  turnoutPercentage: number;
+  straightTicketPanelVotes: number;
+  splitTicketVotes: number;
+  hasUnresolvedTies: boolean;
+  postResults: PostResult[];
+  panelResults: PanelResult[];
+  certifiedAt?: string;
+  ledgerHeadHash: string;
+  chainIntegrityVerified: boolean;
+};
+
 const DEFAULT_POSTS = ['Chairperson', 'Secretary', 'Treasurer', 'Committee Member'];
 
 async function api<T>(path: string, method = 'GET', body?: unknown, token?: string): Promise<T> {
@@ -246,7 +300,7 @@ export default function App() {
   const [electionTenantId, setElectionTenantId] = useState('');
   const [electionStartTime, setElectionStartTime] = useState('');
   const [electionEndTime, setElectionEndTime] = useState('');
-  const [detailTab, setDetailTab] = useState<'posts' | 'panels' | 'candidates' | 'voters'>('posts');
+  const [detailTab, setDetailTab] = useState<'posts' | 'panels' | 'candidates' | 'voters' | 'results'>('posts');
 
   // Posts & Panels Management
   const [newPostTitle, setNewPostTitle] = useState('');
@@ -288,6 +342,16 @@ export default function App() {
   const [chainIntegrity, setChainIntegrity] = useState<ChainIntegrityResponse | null>(null);
   const [auditFilterType, setAuditFilterType] = useState('ALL');
   const [auditSearch, setAuditSearch] = useState('');
+
+  // Phase 4: Results, Analytics & Tie-Breaker Resolution
+  const [electionResults, setElectionResults] = useState<ElectionResultsResponse | null>(null);
+  const [reportModalVisible, setReportModalVisible] = useState(false);
+  const [reportText, setReportText] = useState('');
+  const [tieModalVisible, setTieModalVisible] = useState(false);
+  const [tiePostId, setTiePostId] = useState('');
+  const [tieWinningCandId, setTieWinningCandId] = useState('');
+  const [tieMethod, setTieMethod] = useState<'DRAW_OF_LOTS' | 'BYE_LAW_RULE' | 'MANUAL_RECOUNT'>('DRAW_OF_LOTS');
+  const [tieNotes, setTieNotes] = useState('');
 
   useEffect(() => {
     (async () => {
@@ -469,6 +533,7 @@ export default function App() {
       setScreen('election-detail');
       if (detail.posts.length > 0) setNomPostId(detail.posts[0].id);
       if (detail.panels.length > 0) setNomPanelId(detail.panels[0].id);
+      loadElectionResults(electionId);
     });
   }
 
@@ -479,6 +544,7 @@ export default function App() {
         status: newStatus
       }, token);
       setActiveElection(prev => prev ? { ...prev, election: updated } : null);
+      loadElectionResults(activeElection.election.id);
       setNotice(`Election status advanced to ${newStatus}.`);
     });
   }
@@ -674,6 +740,78 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
       const integrity = await api<ChainIntegrityResponse>('/api/audit/verify', 'GET', undefined, token);
       setChainIntegrity(integrity);
       setNotice(integrity.valid ? `✓ Blockchain Integrity Confirmed: All ${integrity.totalBlocks} blocks valid.` : `⚠ Warning: ${integrity.message}`);
+    });
+  }
+
+  // Phase 4 Functions: Results, Tie-Breakers, Official Export Reports
+  async function loadElectionResults(electionId: string) {
+    await run(async () => {
+      const results = await api<ElectionResultsResponse>(`/api/elections/${electionId}/results`, 'GET', undefined, token);
+      setElectionResults(results);
+    });
+  }
+
+  async function declareFinalResults(electionId: string) {
+    await run(async () => {
+      const results = await api<ElectionResultsResponse>(`/api/elections/${electionId}/declare-results`, 'POST', undefined, token);
+      setElectionResults(results);
+      if (activeElection) {
+        const refreshed = await api<ElectionDetail>(`/api/elections/${electionId}`, 'GET', undefined, token);
+        setActiveElection(refreshed);
+      }
+      setNotice('Official election results have been declared and certified.');
+    });
+  }
+
+  async function submitTieResolution() {
+    if (!activeElection || !tiePostId || !tieWinningCandId) return;
+    await run(async () => {
+      const results = await api<ElectionResultsResponse>(`/api/elections/${activeElection.election.id}/resolve-tie`, 'POST', {
+        postId: tiePostId,
+        winningCandidateId: tieWinningCandId,
+        resolutionMethod: tieMethod,
+        resolutionNotes: tieNotes.trim() || undefined
+      }, token);
+      setElectionResults(results);
+      setTieModalVisible(false);
+      setTiePostId('');
+      setTieWinningCandId('');
+      setTieNotes('');
+      setNotice('Tie successfully resolved in accordance with society bye-laws.');
+    });
+  }
+
+  async function viewOfficialReport(electionId: string) {
+    await run(async () => {
+      const response = await fetch(`${API_URL}/api/elections/${electionId}/report/official`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const text = await response.text();
+      setReportText(text);
+      setReportModalVisible(true);
+    });
+  }
+
+  async function downloadCsv(electionId: string) {
+    await run(async () => {
+      const response = await fetch(`${API_URL}/api/elections/${electionId}/report/csv`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const csv = await response.text();
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && typeof document !== 'undefined') {
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `election-results-${electionId}.csv`;
+        a.click();
+        window.URL.revokeObjectURL(url);
+        setNotice('Election results CSV downloaded successfully.');
+      } else {
+        setReportText(csv);
+        setReportModalVisible(true);
+        setNotice('CSV Results preview generated.');
+      }
     });
   }
 
@@ -1013,6 +1151,158 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
             </View>
             <Footer />
           </>
+        ) : screen === 'results-view' && electionResults ? (
+          <>
+            {/* 4.5 RESIDENT RESULTS VIEW SCREEN (Phase 4) */}
+            <Pressable onPress={() => setScreen('home')} style={styles.backButton}>
+              <Text style={styles.backText}>‹ Back to Dashboard</Text>
+            </Pressable>
+
+            <View style={styles.card}>
+              <View style={styles.sectionHeader}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.formTitle}>{electionResults.electionTitle}</Text>
+                  <Text style={styles.muted}>{electionResults.societyName}</Text>
+                </View>
+                <ElectionStatusPill status={electionResults.status as ElectionStatus} />
+              </View>
+
+              {/* Turnout & Chain Integrity Box */}
+              <View style={styles.resultsTurnoutBox}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <Text style={styles.eyebrow}>OFFICIAL VOTER TURNOUT</Text>
+                  <View style={[styles.statusPill, electionResults.chainIntegrityVerified ? { backgroundColor: '#dcfce7' } : { backgroundColor: '#fee2e2' }]}>
+                    <Text style={[styles.statusText, electionResults.chainIntegrityVerified ? { color: '#166534' } : { color: '#991b1b' }]}>
+                      {electionResults.chainIntegrityVerified ? '✓ LEDGER UNTAMPERED' : '⚠ LEDGER WARNING'}
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8, marginTop: 4 }}>
+                  <Text style={{ fontSize: 32, fontWeight: '900', color: '#0e7490' }}>{electionResults.turnoutPercentage}%</Text>
+                  <Text style={{ fontSize: 13, color: '#475569', fontWeight: '700' }}>
+                    ({electionResults.totalVotesCast} of {electionResults.totalEligibleVoters} eligible votes cast)
+                  </Text>
+                </View>
+
+                <View style={styles.turnoutTrack}>
+                  <View style={[styles.turnoutBar, { width: `${Math.min(100, Math.max(0, electionResults.turnoutPercentage))}%` }]} />
+                </View>
+
+                <View style={styles.statChipsRow}>
+                  <View style={styles.statChip}>
+                    <Text style={styles.statChipText}>🗳 Straight-Ticket: <Text style={{ fontWeight: '900' }}>{electionResults.straightTicketPanelVotes}</Text></Text>
+                  </View>
+                  <View style={styles.statChip}>
+                    <Text style={styles.statChipText}>🔀 Split-Ticket: <Text style={{ fontWeight: '900' }}>{electionResults.splitTicketVotes}</Text></Text>
+                  </View>
+                  <View style={styles.statChip}>
+                    <Text style={styles.statChipText}>🔗 Head Hash: <Text style={{ fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', fontSize: 9 }}>{electionResults.ledgerHeadHash.slice(0, 12)}…</Text></Text>
+                  </View>
+                </View>
+              </View>
+
+              {electionResults.hasUnresolvedTies && (
+                <View style={styles.tieBanner}>
+                  <Text style={styles.tieBannerTitle}>⚠️ STATUTORY TIE DETECTED — SECTION 73CB</Text>
+                  <Text style={styles.tieBannerText}>
+                    Two or more candidates share equal cutoff votes. The Returning Officer must execute a tie-breaker per registered society bye-laws.
+                  </Text>
+                </View>
+              )}
+
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+                <Button
+                  title="📄 View Official Certification Report"
+                  onPress={() => viewOfficialReport(electionResults.electionId)}
+                />
+                <Button
+                  title="⬇ Export CSV"
+                  kind="secondary"
+                  onPress={() => downloadCsv(electionResults.electionId)}
+                />
+              </View>
+
+              <Text style={[styles.sectionTitle, { fontSize: 16, marginTop: 8 }]}>Contested Positions & Certified Returns</Text>
+              {electionResults.postResults.map(pr => (
+                <View key={pr.postId} style={{ marginVertical: 10, padding: 12, backgroundColor: '#f8fafc', borderRadius: 14, borderWidth: 1, borderColor: '#e2e8f0' }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.itemTitle}>{pr.postTitle}</Text>
+                      <Text style={styles.muted}>Seats: {pr.maxSelections} · Total Valid Votes: {pr.totalVotesForPost}</Text>
+                    </View>
+                  </View>
+
+                  {!!pr.tieNotes && (
+                    <View style={{ backgroundColor: pr.hasTie ? '#fffbeb' : '#ecfdf5', padding: 8, borderRadius: 8, marginTop: 8 }}>
+                      <Text style={{ fontSize: 11, color: pr.hasTie ? '#b45309' : '#065f46', fontWeight: '600' }}>
+                        {pr.tieNotes}
+                      </Text>
+                    </View>
+                  )}
+
+                  <View style={{ marginTop: 8 }}>
+                    {pr.candidateResults.map(cr => {
+                      const isWinner = cr.outcome.includes('ELECTED');
+                      const isTie = cr.outcome.includes('TIED');
+                      return (
+                        <View key={cr.candidateId} style={styles.candidateResultCard}>
+                          <View style={styles.candidateResultHeader}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+                              <View style={[styles.rankTag, isWinner && styles.rankTagWinner]}>
+                                <Text style={[styles.rankTagText, isWinner && styles.rankTagTextWinner]}>#{cr.rank}</Text>
+                              </View>
+                              <View style={{ flex: 1 }}>
+                                <Text style={styles.itemTitle}>{cr.candidateName}</Text>
+                                <Text style={styles.small}>{cr.panelName ? `Panel: ${cr.panelName}` : 'Independent'} · {cr.email}</Text>
+                              </View>
+                            </View>
+
+                            <View style={{ alignItems: 'flex-end', gap: 4 }}>
+                              <View style={[
+                                styles.outcomeBadge,
+                                isWinner ? styles.outcomeElected : isTie ? styles.outcomeTied : cr.outcome === 'CONTESTING' ? styles.outcomeContesting : styles.outcomeDefeated
+                              ]}>
+                                <Text style={[
+                                  styles.outcomeText,
+                                  isWinner ? { color: '#166534' } : isTie ? { color: '#991b1b' } : cr.outcome === 'CONTESTING' ? { color: '#0369a1' } : { color: '#64748b' }
+                                ]}>
+                                  {cr.outcome}
+                                </Text>
+                              </View>
+                              <Text style={{ fontSize: 12, fontWeight: '800', color: '#102a43' }}>
+                                {cr.voteCount} <Text style={{ fontSize: 10, color: '#64748b' }}>({cr.votePercentage}%)</Text>
+                              </Text>
+                            </View>
+                          </View>
+
+                          <View style={styles.voteProgressBarTrack}>
+                            <View style={[styles.voteProgressBarFill, { width: `${Math.min(100, Math.max(0, cr.votePercentage))}%`, backgroundColor: cr.panelColorHex || '#0e7490' }]} />
+                          </View>
+                        </View>
+                      );
+                    })}
+                  </View>
+                </View>
+              ))}
+
+              {electionResults.panelResults.length > 0 && (
+                <View style={{ marginTop: 16, paddingTop: 14, borderTopWidth: 1, borderTopColor: '#edf1f3' }}>
+                  <Text style={[styles.sectionTitle, { fontSize: 16 }]}>Slate / Panel Performance</Text>
+                  <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+                    {electionResults.panelResults.map(p => (
+                      <View key={p.panelId} style={{ flex: 1, minWidth: 140, padding: 12, backgroundColor: '#f8fafc', borderRadius: 12, borderWidth: 1, borderColor: '#e2e8f0' }}>
+                        <Text style={[styles.itemTitle, { color: p.colorHex || '#0e7490' }]}>{p.panelName}</Text>
+                        <Text style={styles.small}>Straight-ticket: <Text style={{ fontWeight: '800' }}>{p.straightTicketVotes}</Text></Text>
+                        <Text style={styles.small}>Candidate votes: <Text style={{ fontWeight: '800' }}>{p.totalCandidateVotes}</Text></Text>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              )}
+            </View>
+            <Footer />
+          </>
         ) : member?.role === 'PLATFORM_ADMIN' || portal === 'admin' ? (
           <>
             {/* 5. ADMIN & AUDITOR PORTAL (Phase 1, 2 & 3) */}
@@ -1305,6 +1595,9 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
                       {activeElection.election.status === 'VOTING_OPEN' && (
                         <Button title="Close Voting Window" onPress={() => changeElectionStatus('VOTING_CLOSED')} disabled={busy} full />
                       )}
+                      {activeElection.election.status === 'VOTING_CLOSED' && (
+                        <Button title="Declare & Certify Results" onPress={() => declareFinalResults(activeElection.election.id)} disabled={busy} full />
+                      )}
                     </View>
                   </View>
 
@@ -1320,6 +1613,9 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
                     </Pressable>
                     <Pressable style={[styles.navItem, detailTab === 'voters' && styles.navActive]} onPress={() => setDetailTab('voters')}>
                       <Text style={[styles.navText, detailTab === 'voters' && styles.navTextActive]}>Voter Roll ({activeElection.voterRoll.length})</Text>
+                    </Pressable>
+                    <Pressable style={[styles.navItem, detailTab === 'results' && styles.navActive]} onPress={() => { setDetailTab('results'); loadElectionResults(activeElection.election.id); }}>
+                      <Text style={[styles.navText, detailTab === 'results' && styles.navTextActive]}>Results & Analytics</Text>
                     </Pressable>
                   </View>
                 </View>
@@ -1542,6 +1838,184 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
                     )}
                   </View>
                 )}
+
+                {/* TAB 5: RESULTS & ANALYTICS (Phase 4) */}
+                {detailTab === 'results' && (
+                  <View style={styles.card}>
+                    <View style={styles.sectionHeader}>
+                      <View>
+                        <Text style={styles.sectionTitle}>Election Returns & Analytics</Text>
+                        <Text style={styles.muted}>Automated tallies, voter turnout metrics, and certified outcomes.</Text>
+                      </View>
+                      <Pressable style={styles.refreshPill} onPress={() => loadElectionResults(activeElection.election.id)}>
+                        <Text style={{ fontSize: 11, fontWeight: '800', color: '#0e7490' }}>↻ Refresh</Text>
+                      </Pressable>
+                    </View>
+
+                    {!electionResults ? (
+                      <View style={styles.loading}>
+                        <ActivityIndicator color="#0e7490" />
+                        <Text style={styles.small}>Tallying votes and verifying cryptographic ledger...</Text>
+                      </View>
+                    ) : (
+                      <>
+                        {/* Overall Voter Turnout & Blockchain Proof Card */}
+                        <View style={styles.resultsTurnoutBox}>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <Text style={styles.eyebrow}>OFFICIAL VOTER TURNOUT</Text>
+                            <View style={[styles.statusPill, electionResults.chainIntegrityVerified ? { backgroundColor: '#dcfce7' } : { backgroundColor: '#fee2e2' }]}>
+                              <Text style={[styles.statusText, electionResults.chainIntegrityVerified ? { color: '#166534' } : { color: '#991b1b' }]}>
+                                {electionResults.chainIntegrityVerified ? '✓ LEDGER UNTAMPERED' : '⚠ LEDGER WARNING'}
+                              </Text>
+                            </View>
+                          </View>
+
+                          <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8, marginTop: 4 }}>
+                            <Text style={{ fontSize: 32, fontWeight: '900', color: '#0e7490' }}>{electionResults.turnoutPercentage}%</Text>
+                            <Text style={{ fontSize: 13, color: '#475569', fontWeight: '700' }}>
+                              ({electionResults.totalVotesCast} of {electionResults.totalEligibleVoters} eligible votes cast)
+                            </Text>
+                          </View>
+
+                          {/* Progress Track */}
+                          <View style={styles.turnoutTrack}>
+                            <View style={[styles.turnoutBar, { width: `${Math.min(100, Math.max(0, electionResults.turnoutPercentage))}%` }]} />
+                          </View>
+
+                          {/* Stat Chips */}
+                          <View style={styles.statChipsRow}>
+                            <View style={styles.statChip}>
+                              <Text style={styles.statChipText}>🗳 Straight-Ticket: <Text style={{ fontWeight: '900' }}>{electionResults.straightTicketPanelVotes}</Text></Text>
+                            </View>
+                            <View style={styles.statChip}>
+                              <Text style={styles.statChipText}>🔀 Split-Ticket: <Text style={{ fontWeight: '900' }}>{electionResults.splitTicketVotes}</Text></Text>
+                            </View>
+                            <View style={styles.statChip}>
+                              <Text style={styles.statChipText}>🔗 Head Hash: <Text style={{ fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', fontSize: 9 }}>{electionResults.ledgerHeadHash.slice(0, 12)}…</Text></Text>
+                            </View>
+                          </View>
+                        </View>
+
+                        {/* Statutory Tie Alert (REQ-8, Section 5.5) */}
+                        {electionResults.hasUnresolvedTies && (
+                          <View style={styles.tieBanner}>
+                            <Text style={styles.tieBannerTitle}>⚠️ STATUTORY TIE DETECTED — SECTION 73CB</Text>
+                            <Text style={styles.tieBannerText}>
+                              Two or more candidates contesting for a post share equal cutoff votes. Under Maharashtra Co-operative Societies Act Sec 73CB, ties cannot be decided arbitrarily by the platform. The Returning Officer must execute a tie-breaker per registered society bye-laws.
+                            </Text>
+                          </View>
+                        )}
+
+                        {/* Action Toolbar */}
+                        <View style={{ flexDirection: 'row', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+                          <Button
+                            title="📄 View Official Certification Report"
+                            onPress={() => viewOfficialReport(activeElection.election.id)}
+                          />
+                          <Button
+                            title="⬇ Export CSV"
+                            kind="secondary"
+                            onPress={() => downloadCsv(activeElection.election.id)}
+                          />
+                        </View>
+
+                        {/* Post-By-Post Results */}
+                        <Text style={[styles.sectionTitle, { fontSize: 16, marginTop: 8 }]}>Contested Positions & Certified Returns</Text>
+                        {electionResults.postResults.map(pr => (
+                          <View key={pr.postId} style={{ marginVertical: 10, padding: 12, backgroundColor: '#f8fafc', borderRadius: 14, borderWidth: 1, borderColor: '#e2e8f0' }}>
+                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <View style={{ flex: 1 }}>
+                                <Text style={styles.itemTitle}>{pr.postTitle}</Text>
+                                <Text style={styles.muted}>Seats: {pr.maxSelections} · Total Valid Votes: {pr.totalVotesForPost}</Text>
+                              </View>
+                              {pr.hasTie && (
+                                <Pressable
+                                  style={[styles.statusPill, { backgroundColor: '#fee2e2', paddingHorizontal: 10, paddingVertical: 6 }]}
+                                  onPress={() => {
+                                    setTiePostId(pr.postId);
+                                    if (pr.candidateResults.length > 0) setTieWinningCandId(pr.candidateResults[0].candidateId);
+                                    setTieModalVisible(true);
+                                  }}
+                                >
+                                  <Text style={[styles.statusText, { color: '#991b1b' }]}>⚡ Resolve Tie</Text>
+                                </Pressable>
+                              )}
+                            </View>
+
+                            {!!pr.tieNotes && (
+                              <View style={{ backgroundColor: pr.hasTie ? '#fffbeb' : '#ecfdf5', padding: 8, borderRadius: 8, marginTop: 8 }}>
+                                <Text style={{ fontSize: 11, color: pr.hasTie ? '#b45309' : '#065f46', fontWeight: '600' }}>
+                                  {pr.tieNotes}
+                                </Text>
+                              </View>
+                            )}
+
+                            {/* Candidate Breakdown */}
+                            <View style={{ marginTop: 8 }}>
+                              {pr.candidateResults.map(cr => {
+                                const isWinner = cr.outcome.includes('ELECTED');
+                                const isTie = cr.outcome.includes('TIED');
+                                return (
+                                  <View key={cr.candidateId} style={styles.candidateResultCard}>
+                                    <View style={styles.candidateResultHeader}>
+                                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+                                        <View style={[styles.rankTag, isWinner && styles.rankTagWinner]}>
+                                          <Text style={[styles.rankTagText, isWinner && styles.rankTagTextWinner]}>#{cr.rank}</Text>
+                                        </View>
+                                        <View style={{ flex: 1 }}>
+                                          <Text style={styles.itemTitle}>{cr.candidateName}</Text>
+                                          <Text style={styles.small}>{cr.panelName ? `Panel: ${cr.panelName}` : 'Independent'} · {cr.email}</Text>
+                                        </View>
+                                      </View>
+
+                                      <View style={{ alignItems: 'flex-end', gap: 4 }}>
+                                        <View style={[
+                                          styles.outcomeBadge,
+                                          isWinner ? styles.outcomeElected : isTie ? styles.outcomeTied : cr.outcome === 'CONTESTING' ? styles.outcomeContesting : styles.outcomeDefeated
+                                        ]}>
+                                          <Text style={[
+                                            styles.outcomeText,
+                                            isWinner ? { color: '#166534' } : isTie ? { color: '#991b1b' } : cr.outcome === 'CONTESTING' ? { color: '#0369a1' } : { color: '#64748b' }
+                                          ]}>
+                                            {cr.outcome}
+                                          </Text>
+                                        </View>
+                                        <Text style={{ fontSize: 12, fontWeight: '800', color: '#102a43' }}>
+                                          {cr.voteCount} <Text style={{ fontSize: 10, color: '#64748b' }}>({cr.votePercentage}%)</Text>
+                                        </Text>
+                                      </View>
+                                    </View>
+
+                                    {/* Percentage Bar */}
+                                    <View style={styles.voteProgressBarTrack}>
+                                      <View style={[styles.voteProgressBarFill, { width: `${Math.min(100, Math.max(0, cr.votePercentage))}%`, backgroundColor: cr.panelColorHex || '#0e7490' }]} />
+                                    </View>
+                                  </View>
+                                );
+                              })}
+                            </View>
+                          </View>
+                        ))}
+
+                        {/* Contesting Panels Performance */}
+                        {electionResults.panelResults.length > 0 && (
+                          <View style={{ marginTop: 16, paddingTop: 14, borderTopWidth: 1, borderTopColor: '#edf1f3' }}>
+                            <Text style={[styles.sectionTitle, { fontSize: 16 }]}>Slate / Panel Performance</Text>
+                            <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+                              {electionResults.panelResults.map(p => (
+                                <View key={p.panelId} style={{ flex: 1, minWidth: 140, padding: 12, backgroundColor: '#f8fafc', borderRadius: 12, borderWidth: 1, borderColor: '#e2e8f0' }}>
+                                  <Text style={[styles.itemTitle, { color: p.colorHex || '#0e7490' }]}>{p.panelName}</Text>
+                                  <Text style={styles.small}>Straight-ticket: <Text style={{ fontWeight: '800' }}>{p.straightTicketVotes}</Text></Text>
+                                  <Text style={styles.small}>Candidate votes: <Text style={{ fontWeight: '800' }}>{p.totalCandidateVotes}</Text></Text>
+                                </View>
+                              ))}
+                            </View>
+                          </View>
+                        )}
+                      </>
+                    )}
+                  </View>
+                )}
               </>
             )}
 
@@ -1598,10 +2072,31 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
                     )}
 
                     {el.status === 'VOTING_OPEN' && (
-                      <View style={{ marginTop: 10 }}>
+                      <View style={{ marginTop: 10, flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
                         <Button
                           title="Cast Secret Ballot →"
                           onPress={() => openBallot(el.id)}
+                        />
+                        <Button
+                          title="Live Turnout Stats"
+                          kind="secondary"
+                          onPress={async () => {
+                            await loadElectionResults(el.id);
+                            setScreen('results-view');
+                          }}
+                        />
+                      </View>
+                    )}
+
+                    {(el.status === 'VOTING_CLOSED' || el.status === 'RESULTS_DECLARED') && (
+                      <View style={{ marginTop: 10 }}>
+                        <Button
+                          title="View Certified Election Returns →"
+                          kind="secondary"
+                          onPress={async () => {
+                            await loadElectionResults(el.id);
+                            setScreen('results-view');
+                          }}
                         />
                       </View>
                     )}
@@ -1679,6 +2174,92 @@ C-301,Amit Deshmukh,amit.deshmukh@example.com,+919876543214,XXXX-XXXX-9900,false
           </View>
         )}
       </ScrollView>
+
+      {/* Phase 4: Tie Resolution Modal (Section 5.5) */}
+      {tieModalVisible && (
+        <View style={styles.reportModalOverlay}>
+          <View style={styles.reportModalContainer}>
+            <Text style={styles.formTitle}>Resolve Tie (Section 73CB)</Text>
+            <Text style={styles.muted}>Maharashtra Co-op Societies Act requires statutory tie-breaking per society bye-laws.</Text>
+
+            <Text style={[styles.fieldLabel, { marginTop: 14 }]}>SELECT WINNING CANDIDATE</Text>
+            {electionResults?.postResults.find(p => p.postId === tiePostId)?.candidateResults.map(cr => (
+              <Pressable
+                key={cr.candidateId}
+                onPress={() => setTieWinningCandId(cr.candidateId)}
+                style={[styles.societyOption, tieWinningCandId === cr.candidateId && styles.societyOptionSelected]}
+              >
+                <View style={styles.societyInfo}>
+                  <Text style={styles.itemTitle}>{cr.candidateName}</Text>
+                  <Text style={styles.muted}>{cr.panelName || 'Independent'} · {cr.voteCount} votes ({cr.votePercentage}%)</Text>
+                </View>
+                <View style={[styles.radioOuter, tieWinningCandId === cr.candidateId && styles.radioOuterSelected]}>
+                  {tieWinningCandId === cr.candidateId && <View style={styles.radioInner} />}
+                </View>
+              </Pressable>
+            ))}
+
+            <Text style={[styles.fieldLabel, { marginTop: 14 }]}>RESOLUTION PROTOCOL</Text>
+            <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
+              {(['DRAW_OF_LOTS', 'BYE_LAW_RULE', 'MANUAL_RECOUNT'] as const).map(m => (
+                <Pressable
+                  key={m}
+                  onPress={() => setTieMethod(m)}
+                  style={[styles.postOption, tieMethod === m && styles.postOptionSelected]}
+                >
+                  <Text style={[styles.postOptionText, tieMethod === m && styles.postOptionTextSelected]}>
+                    {m.replace(/_/g, ' ')}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <Field
+              label="RETURNING OFFICER NOTES / BYE-LAW CLAUSE"
+              value={tieNotes}
+              onChangeText={setTieNotes}
+              placeholder="e.g. Draw of lots conducted in presence of election committee per Bye-law 116(c)"
+            />
+
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 14 }}>
+              <Button
+                title="Confirm Tie-Breaker & Record in Ledger"
+                onPress={submitTieResolution}
+                disabled={busy || !tieWinningCandId}
+              />
+              <Button
+                title="Cancel"
+                kind="secondary"
+                onPress={() => setTieModalVisible(false)}
+              />
+            </View>
+          </View>
+        </View>
+      )}
+
+      {/* Phase 4: Official Scrutiny & Certification Report Modal */}
+      {reportModalVisible && (
+        <View style={styles.reportModalOverlay}>
+          <View style={styles.reportModalContainer}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={styles.formTitle}>Official Certification Return</Text>
+              <Pressable onPress={() => setReportModalVisible(false)}>
+                <Text style={{ fontSize: 18, fontWeight: '800', color: '#64748b' }}>✕</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.muted}>Official Scrutiny & Return Report under Section 73CB.</Text>
+            <ScrollView style={styles.reportTextScrollView}>
+              <Text selectable style={styles.reportMonospace}>{reportText}</Text>
+            </ScrollView>
+            <Button
+              title="Close"
+              kind="secondary"
+              onPress={() => setReportModalVisible(false)}
+              full
+            />
+          </View>
+        </View>
+      )}
     </KeyboardAvoidingView>
   );
 }
@@ -1724,14 +2305,15 @@ function StatusPill({ status }: { status: string }) {
 function ElectionStatusPill({ status }: { status: ElectionStatus }) {
   const isOpen = status === 'VOTING_OPEN';
   const isClosed = status === 'VOTING_CLOSED';
+  const isDeclared = status === 'RESULTS_DECLARED';
   const isPublished = status === 'PUBLISHED';
 
-  const bg = isOpen ? '#def7ec' : isClosed ? '#fde8e8' : isPublished ? '#e1effe' : '#f3f4f6';
-  const color = isOpen ? '#03543f' : isClosed ? '#9b1c1c' : isPublished ? '#1e429f' : '#374151';
+  const bg = isDeclared ? '#dcfce7' : isOpen ? '#def7ec' : isClosed ? '#fde8e8' : isPublished ? '#e1effe' : '#f3f4f6';
+  const color = isDeclared ? '#166534' : isOpen ? '#03543f' : isClosed ? '#9b1c1c' : isPublished ? '#1e429f' : '#374151';
 
   return (
     <View style={[styles.statusPill, { backgroundColor: bg }]}>
-      <Text style={[styles.statusText, { color }]}>{status.replace('_', ' ')}</Text>
+      <Text style={[styles.statusText, { color }]}>{status.replace(/_/g, ' ')}</Text>
     </View>
   );
 }
@@ -1925,5 +2507,34 @@ const styles = StyleSheet.create({
   sequenceBadge: { backgroundColor: '#e2e8f0', paddingHorizontal: 6, paddingVertical: 3, borderRadius: 6 },
   sequenceBadgeText: { fontSize: 10, fontWeight: '900', color: '#334155', fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' },
   hashChainBox: { backgroundColor: '#f1f5f9', padding: 6, borderRadius: 6, marginTop: 6 },
-  hashChainText: { fontSize: 9, color: '#475569', fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' }
+  hashChainText: { fontSize: 9, color: '#475569', fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' },
+
+  // Phase 4: Results, Analytics & Tie Resolution Styles
+  resultsTurnoutBox: { backgroundColor: '#f0fdfa', borderRadius: 16, padding: 16, borderWidth: 1, borderColor: '#ccfbf1', marginBottom: 16 },
+  turnoutTrack: { height: 10, backgroundColor: '#e2e8f0', borderRadius: 5, overflow: 'hidden', marginVertical: 8 },
+  turnoutBar: { height: '100%', backgroundColor: '#0e7490', borderRadius: 5 },
+  statChipsRow: { flexDirection: 'row', gap: 8, marginTop: 8, flexWrap: 'wrap' },
+  statChip: { backgroundColor: '#fff', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, borderWidth: 1, borderColor: '#e2e8f0' },
+  statChipText: { fontSize: 10, fontWeight: '700', color: '#334155' },
+  tieBanner: { backgroundColor: '#fffbeb', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: '#fde68a', marginVertical: 12 },
+  tieBannerTitle: { fontSize: 12, fontWeight: '900', color: '#b45309', marginBottom: 4 },
+  tieBannerText: { fontSize: 11, color: '#92400e', lineHeight: 16 },
+  candidateResultCard: { backgroundColor: '#fff', padding: 12, borderRadius: 12, borderWidth: 1, borderColor: '#e2e8f0', marginVertical: 6 },
+  candidateResultHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  rankTag: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#f1f5f9', alignItems: 'center', justifyContent: 'center' },
+  rankTagWinner: { backgroundColor: '#dcfce7' },
+  rankTagText: { fontSize: 11, fontWeight: '900', color: '#334155' },
+  rankTagTextWinner: { color: '#166534' },
+  outcomeBadge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  outcomeElected: { backgroundColor: '#dcfce7' },
+  outcomeTied: { backgroundColor: '#fee2e2' },
+  outcomeDefeated: { backgroundColor: '#f1f5f9' },
+  outcomeContesting: { backgroundColor: '#e0f2fe' },
+  outcomeText: { fontSize: 9, fontWeight: '900', textTransform: 'uppercase' },
+  voteProgressBarTrack: { height: 6, backgroundColor: '#f1f5f9', borderRadius: 3, overflow: 'hidden', marginTop: 8 },
+  voteProgressBarFill: { height: '100%', backgroundColor: '#0e7490', borderRadius: 3 },
+  reportModalOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(15,23,42,0.65)', justifyContent: 'center', alignItems: 'center', padding: 16, zIndex: 100 },
+  reportModalContainer: { backgroundColor: '#fff', borderRadius: 16, padding: 18, width: '100%', maxWidth: 620, maxHeight: '85%' },
+  reportTextScrollView: { backgroundColor: '#f8fafc', padding: 12, borderRadius: 10, borderWidth: 1, borderColor: '#e2e8f0', marginVertical: 12 },
+  reportMonospace: { fontSize: 10, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', color: '#1e293b', lineHeight: 15 }
 });

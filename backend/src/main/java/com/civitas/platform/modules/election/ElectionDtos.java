@@ -214,6 +214,65 @@ public final class ElectionDtos {
         String message,
         Long tamperedAtSequence
     ) {}
+
+    public record CandidateResult(
+        String candidateId,
+        String candidateName,
+        String email,
+        String panelId,
+        String panelName,
+        String panelColorHex,
+        long voteCount,
+        double votePercentage,
+        String outcome,
+        int rank,
+        boolean isTieBreakerWinner
+    ) {}
+
+    public record PostResult(
+        String postId,
+        String postTitle,
+        int maxSelections,
+        long totalVotesForPost,
+        boolean hasTie,
+        String tieNotes,
+        String resolvedWinningCandidateId,
+        String tieResolutionMethod,
+        List<CandidateResult> candidateResults
+    ) {}
+
+    public record PanelResult(
+        String panelId,
+        String panelName,
+        String colorHex,
+        long straightTicketVotes,
+        long totalCandidateVotes
+    ) {}
+
+    public record ElectionResultsResponse(
+        String electionId,
+        String electionTitle,
+        String societyName,
+        String status,
+        long totalEligibleVoters,
+        long totalVotesCast,
+        double turnoutPercentage,
+        long straightTicketPanelVotes,
+        long splitTicketVotes,
+        boolean hasUnresolvedTies,
+        List<PostResult> postResults,
+        List<PanelResult> panelResults,
+        String certifiedAt,
+        String ledgerHeadHash,
+        boolean chainIntegrityVerified
+    ) {}
+
+    public record ResolveTieRequest(
+        @NotBlank String postId,
+        @NotBlank String winningCandidateId,
+        @NotBlank String resolutionMethod,
+        String resolutionNotes
+    ) {}
 }
 
 

@@ -12,4 +12,6 @@ public interface BallotRepository extends JpaRepository<Ballot, UUID> {
     Optional<Ballot> findByReceiptCode(String receiptCode);
     Optional<Ballot> findByBallotHash(String ballotHash);
     long countByElectionId(UUID electionId);
+    long countByElectionIdAndIsPanelVoteTrue(UUID electionId);
+    long countByElectionIdAndIsPanelVoteFalse(UUID electionId);
 }

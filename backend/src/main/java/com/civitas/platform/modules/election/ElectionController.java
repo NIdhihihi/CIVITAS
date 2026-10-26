@@ -113,5 +113,35 @@ public class ElectionController {
     public ElectionDtos.ReceiptVerifyResponse verifyReceipt(@PathVariable String receiptCode) {
         return service.verifyReceipt(receiptCode);
     }
+
+    // --- Phase 4: Automated Real-Time Results & Official Reports (REQ-8, REQ-9, Section 5.5) ---
+
+    @GetMapping("/{id}/results")
+    public ElectionDtos.ElectionResultsResponse getResults(@PathVariable UUID id, Authentication auth) {
+        return service.getElectionResults(id, auth != null ? auth.getName() : null);
+    }
+
+    @PostMapping("/{id}/declare-results")
+    public ElectionDtos.ElectionResultsResponse declareResults(@PathVariable UUID id, Authentication auth) {
+        return service.declareResults(id, auth.getName());
+    }
+
+    @PostMapping("/{id}/resolve-tie")
+    public ElectionDtos.ElectionResultsResponse resolveTie(
+            @PathVariable UUID id,
+            @Valid @RequestBody ElectionDtos.ResolveTieRequest req,
+            Authentication auth) {
+        return service.resolveTie(id, req, auth.getName());
+    }
+
+    @GetMapping(value = "/{id}/report/official", produces = "text/plain;charset=UTF-8")
+    public String getOfficialReport(@PathVariable UUID id, Authentication auth) {
+        return service.generateOfficialReport(id, auth != null ? auth.getName() : null);
+    }
+
+    @GetMapping(value = "/{id}/report/csv", produces = "text/csv;charset=UTF-8")
+    public String getCsvReport(@PathVariable UUID id, Authentication auth) {
+        return service.generateCsvReport(id, auth != null ? auth.getName() : null);
+    }
 }
 

@@ -48,4 +48,4 @@ civitas:
     expiration-minutes: ${OTP_EXPIRATION_MINUTES:5}
     expose-in-development: ${OTP_EXPOSE_IN_DEVELOPMENT:true}
   cors:
-    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:8081,http://localhost:8082,http://localhost:3000,http://localhost:19006,http://10.0.2.2:8080,http://192.168.0.103:8081,http://192.168.0.103:8080}
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:8081,http://localhost:8082,http://localhost:3000,http://localhost:19006,http://10.0.2.2:8080,http://192.168.0.103:8081,http://192.168.0.103:8082,http://192.168.0.103:8080}

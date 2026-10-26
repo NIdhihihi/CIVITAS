@@ -425,11 +425,16 @@ export default function App() {
       const path = portal === 'admin' ? '/api/auth/admin/login' : '/api/auth/login';
       const result = await api<{ token: string; member: Member }>(path, 'POST', { email: email.trim(), password });
       await AsyncStorage.setItem('civitas_token', result.token);
-      await AsyncStorage.setItem('civitas_portal', portal);
+      const effectivePortal: Portal =
+        result.member.role === 'PLATFORM_ADMIN' ? 'admin' :
+        result.member.role === 'CANDIDATE' ? 'candidate' :
+        portal;
+      await AsyncStorage.setItem('civitas_portal', effectivePortal);
       setToken(result.token);
       setMember(result.member);
-      setScreen(portal === 'candidate' ? 'candidate-dashboard' : 'home');
-      setNotice('Signed in successfully.');
+      setPortal(effectivePortal);
+      setScreen(effectivePortal === 'candidate' ? 'candidate-dashboard' : 'home');
+      setNotice(`Signed in successfully as ${result.member.fullName || result.member.email}.`);
     });
   }
 

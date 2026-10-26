@@ -1,0 +1,51 @@
+spring:
+  config:
+    activate:
+      on-profile: dev
+    import: optional:file:.env.dev[.properties]
+  datasource:
+    url: jdbc:h2:mem:civitas
+    username: sa
+    password: 
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    database-platform: org.hibernate.dialect.H2Dialect
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  mail:
+    host: localhost
+    port: 1025
+    username: 
+    password: 
+    properties:
+      mail.smtp.auth: false
+      mail.smtp.starttls.enable: false
+server:
+  port: ${PORT:8082}
+app:
+  jwt:
+    secret: ${JWT_SECRET:local-development-secret-key-change-me-please-123456}
+    expiration-minutes: ${JWT_EXPIRATION_MINUTES:120}
+  otp:
+    log-to-console: ${OTP_LOG_TO_CONSOLE:true}
+  bootstrap-admin:
+    email: ${CIVITAS_ADMIN_EMAIL:admin@civitas.local}
+    password: ${CIVITAS_ADMIN_PASSWORD:civitas@123}
+    full-name: ${CIVITAS_ADMIN_FULL_NAME:CIVITAS Platform Administrator}
+civitas:
+  jwt:
+    secret: ${JWT_SECRET:local-development-secret-key-change-me-please-123456}
+    expiration-minutes: ${JWT_EXPIRATION_MINUTES:60}
+  otp:
+    expiration-minutes: ${OTP_EXPIRATION_MINUTES:5}
+    expose-in-development: ${OTP_EXPOSE_IN_DEVELOPMENT:true}
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://10.0.2.2:8080}

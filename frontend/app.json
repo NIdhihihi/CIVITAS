@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "CIVITAS",
+    "slug": "civitas-android",
+    "version": "0.2.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "scheme": "civitas",
+    "android": {
+      "package": "com.civitas.mobile",
+      "permissions": [
+        "USE_BIOMETRIC",
+        "USE_FINGERPRINT"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow CIVITAS to choose candidate and panel photos.",
+          "cameraPermission": false
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Allow CIVITAS to confirm your identity before opening the ballot."
+        }
+      ],
+      "expo-sharing",
+      "expo-status-bar",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ]
+  }
+}
